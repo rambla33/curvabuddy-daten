@@ -1,0 +1,87 @@
+name: Daten (Tankstellen, Gipfel, Pässe)
+
+# Erzeugt die Datendateien der App CurvaBuddy (OpenStreetMap, Wikidata) und legt sie im Release «daten» ab.
+# Die App holt sie dort selbst (täglich im WLAN), ein Neubau der App ist nicht nötig.
+# Dieses Repository ist öffentlich, die Laufzeit kostet nichts. Nur Alpenländer, selten.
+on:
+  workflow_dispatch:
+    inputs:
+      datei:
+        description: "Welche Datei erneuern?"
+        type: choice
+        options: [tankstellen, gipfel, paesse]
+        default: tankstellen
+      voll:
+        description: "Alles neu laden (statt nur fehlende Felder)"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 3 1 */2 *"   # Tankstellen: alle zwei Monate
+    - cron: "0 3 15 2 *"    # Gipfel: jährlich
+    - cron: "0 3 15 3 *"    # Pässe: jährlich, vor der Pass-Saison
+
+permissions:
+  contents: write
+
+# Alle Läufe nacheinander, weil sie dieselbe Verzeichnisdatei daten.json ändern.
+concurrency:
+  group: daten
+  cancel-in-progress: false
+
+jobs:
+  daten:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Datei bestimmen
+        id: was
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            case "${{ github.event.schedule }}" in
+              "0 3 1 */2 *")  datei=tankstellen ;;
+              "0 3 15 2 *")   datei=gipfel ;;
+              *)              datei=paesse ;;
+            esac
+            voll=1
+          else
+            datei="${{ inputs.datei }}"
+            voll=$([ "${{ inputs.voll }}" = "true" ] && echo 1 || echo 0)
+          fi
+          case "$datei" in
+            tankstellen) echo "skript=build_fuel.py"  >> "$GITHUB_OUTPUT"; echo "name=tankstellen-europa.json" >> "$GITHUB_OUTPUT" ;;
+            gipfel)      echo "skript=build_peaks.py"  >> "$GITHUB_OUTPUT"; echo "name=gipfel-europa.json" >> "$GITHUB_OUTPUT" ;;
+            paesse)      echo "skript=build_passes.py" >> "$GITHUB_OUTPUT"; echo "name=paesse-europa.json" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "voll=$voll" >> "$GITHUB_OUTPUT"
+      - name: Release «daten» sicherstellen und bisherige Dateien laden
+        run: |
+          gh release view daten >/dev/null 2>&1 || gh release create daten --title "Daten" \
+            --notes "Dateien für die App CurvaBuddy, siehe README. Wird automatisch erneuert."
+          mkdir -p ausgabe
+          # Bisherige Datei und Verzeichnis (für das schrittweise Ergänzen); fehlen sie, ist das in Ordnung.
+          gh release download daten --pattern "${{ steps.was.outputs.name }}" --dir ausgabe || true
+          gh release download daten --pattern daten.json --dir ausgabe || true
+      - name: Datei erzeugen
+        env:
+          VOLL: ${{ steps.was.outputs.voll }}
+        run: python3 scripts/${{ steps.was.outputs.skript }} ausgabe/${{ steps.was.outputs.name }}
+      - name: Im Release ablegen
+        run: |
+          ls -lh ausgabe
+          python3 scripts/manifest.py ausgabe/daten.json ausgabe/${{ steps.was.outputs.name }}
+          gh release upload daten ausgabe/${{ steps.was.outputs.name }} ausgabe/daten.json --clobber
+      - name: Stand festhalten (hält die geplanten Läufe am Leben)
+        run: |
+          mkdir -p stand
+          date -u +"%Y-%m-%d ${{ steps.was.outputs.name }}" > "stand/${{ steps.was.outputs.name }}.txt"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stand
+          git commit -m "Stand ${{ steps.was.outputs.name }}" || echo "Keine Änderung."
+          git pull --rebase origin "$GITHUB_REF_NAME" && git push

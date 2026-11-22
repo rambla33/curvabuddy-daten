@@ -1,0 +1,84 @@
+name: Alpenkarte (OSM)
+
+# Schneidet die Alpen (bis Zoomstufe 12, ca. 500 MB) aus der täglichen Protomaps-Basiskarte (OpenStreetMap-Daten)
+# und legt sie als Datei «alpen.pmtiles» im Release «daten» ab. Die App CurvaBuddy lädt sie von dort.
+# Läuft monatlich und von Hand. Dieses Repository ist öffentlich, die Laufzeit kostet nichts.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 5 * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: karte
+  cancel-in-progress: false
+
+jobs:
+  karte:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Länge, Breite: Westen, Süden, Osten, Norden
+      GEBIET: "5.5,43.5,15,48.5"
+      MAXZOOM: "12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: pmtiles-Werkzeug laden
+        run: |
+          gh release download --repo protomaps/go-pmtiles --pattern '*Linux_x86_64.tar.gz' --output pmtiles.tar.gz
+          tar xzf pmtiles.tar.gz pmtiles
+          ./pmtiles version
+
+      - name: Neuesten Protomaps-Stand finden
+        id: stand
+        run: |
+          for i in $(seq 0 20); do
+            d=$(date -u -d "-$i day" +%Y%m%d)
+            if curl -sfI "https://build.protomaps.com/$d.pmtiles" > /dev/null; then
+              echo "datum=$d" >> "$GITHUB_OUTPUT"
+              echo "Stand $d"
+              exit 0
+            fi
+          done
+          echo "Kein Stand der letzten 21 Tage gefunden" >&2
+          exit 1
+
+      - name: Alpen ausschneiden
+        run: |
+          ./pmtiles extract "https://build.protomaps.com/${{ steps.stand.outputs.datum }}.pmtiles" alpen.pmtiles \
+            --bbox="$GEBIET" --maxzoom="$MAXZOOM"
+          ls -lh alpen.pmtiles
+          ./pmtiles show alpen.pmtiles | head -20
+          # Plausibilität: weniger als 200 MB heisst, dass etwas schiefging (erwartet ca. 500 MB).
+          size=$(stat -c %s alpen.pmtiles)
+          if [ "$size" -lt 200000000 ]; then echo "Datei zu klein: $size Bytes" >&2; exit 1; fi
+
+      - name: Im Release «daten» ablegen
+        run: |
+          if ! gh release view daten > /dev/null 2>&1; then
+            gh release create daten --title "Daten für CurvaBuddy" \
+              --notes "Dateien, die die App CurvaBuddy herunterlädt. Wird automatisch erneuert, siehe README."
+          fi
+          gh release upload daten alpen.pmtiles --clobber
+
+      - name: Stand festhalten
+        run: |
+          mkdir -p stand
+          {
+            echo "stand=${{ steps.stand.outputs.datum }}"
+            echo "gebiet=$GEBIET"
+            echo "maxzoom=$MAXZOOM"
+            echo "groesse=$(stat -c %s alpen.pmtiles)"
+            echo "lauf=$(date -u +%Y-%m-%dT%H:%MZ)"
+          } > stand/karte.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stand/karte.txt
+          # Auch ohne Änderung der Datei gibt es durch den neuen Lauf-Zeitpunkt einen Commit:
+          # so bleibt das Repository aktiv und GitHub schaltet den monatlichen Lauf nicht ab (nach 60 Tagen Ruhe).
+          git commit -m "Alpenkarte erneuert, Stand ${{ steps.stand.outputs.datum }}"
+          git push

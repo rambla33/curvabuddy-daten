@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: karte
+  group: daten
   cancel-in-progress: false
 
 jobs:
@@ -64,6 +64,11 @@ jobs:
               --notes "Dateien, die die App CurvaBuddy herunterlädt. Wird automatisch erneuert, siehe README."
           fi
           gh release upload daten alpen.pmtiles --clobber
+          # Verzeichnis daten.json nachführen (die App erkennt daran, dass es eine neue Karte gibt).
+          mkdir -p verz
+          gh release download daten --pattern daten.json --dir verz || true
+          python3 scripts/manifest.py verz/daten.json alpen.pmtiles
+          gh release upload daten verz/daten.json --clobber
 
       - name: Stand festhalten
         run: |
